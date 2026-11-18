@@ -178,13 +178,30 @@ namespace shell::dock {
     }
   }
 
-  std::int32_t dockContentSize(const DockConfig& cfg, std::size_t itemCount) {
+  float dockMagnificationRadius(const DockConfig& cfg) noexcept {
+    if (cfg.magnificationRange > 0.0F) {
+      return cfg.magnificationRange;
+    }
+    return cfg.magnificationStyle == DockMagnificationStyle::Macos ? kDockMacosMagnificationRadius
+                                                                   : kDockClassicMagnificationRadius;
+  }
+
+  std::int32_t dockSeparatorCellSize(const DockConfig& cfg) {
+    const auto line = static_cast<std::int32_t>(std::ceil(std::max(0.0F, cfg.separatorThickness)));
+    return std::max(1, line + std::max(0, cfg.separatorSpacing) * 2);
+  }
+
+  std::int32_t dockContentSize(const DockConfig& cfg, std::size_t itemCount, std::size_t separatorCount) {
     const auto n = static_cast<std::int32_t>(itemCount);
+    const auto separators = static_cast<std::int32_t>(std::min(separatorCount, itemCount));
     const std::int32_t cellSize = cfg.iconSize + kCellPad * 2;
     if (n == 0) {
       return cellSize + cfg.mainAxisPadding * 2;
     }
-    return n * cellSize + std::max(0, n - 1) * cfg.itemSpacing + cfg.mainAxisPadding * 2;
+    return (n - separators) * cellSize
+        + separators * dockSeparatorCellSize(cfg)
+        + std::max(0, n - 1) * cfg.itemSpacing
+        + cfg.mainAxisPadding * 2;
   }
 
   std::int32_t dockThickness(const DockConfig& cfg) { return cfg.iconSize + kCellPad * 2 + cfg.crossAxisPadding * 2; }
@@ -205,8 +222,14 @@ namespace shell::dock {
     if (peak <= 1.0F) {
       return 0;
     }
-    const float halfIconGrowth = static_cast<float>(cfg.iconSize) * (peak - 1.0F) * 0.5F;
-    const float extra = halfIconGrowth + dockHoverZoomBadgeOverhang(cfg);
+    float growth = static_cast<float>(cfg.iconSize) * (peak - 1.0F) * 0.5F;
+    if (cfg.magnificationStyle == DockMagnificationStyle::Macos) {
+      // The macOS-style dock grows around the pointer, so with the pointer near one end the whole
+      // growth (the area under the raised-cosine falloff, ~radius pitches of full growth) can land
+      // past that end.
+      growth = static_cast<float>(cfg.iconSize) * (peak - 1.0F) * (dockMagnificationRadius(cfg) + 0.5F);
+    }
+    const float extra = growth + dockHoverZoomBadgeOverhang(cfg);
     return static_cast<std::int32_t>(std::ceil(extra));
   }
 
@@ -305,7 +328,8 @@ namespace shell::dock {
   }
 
   DockPanelGeometry computePanelGeometry(
-      const DockConfig& cfg, const ShadowStyle& shadow, float surfaceW, float surfaceH, std::size_t itemCount
+      const DockConfig& cfg, const ShadowStyle& shadow, float surfaceW, float surfaceH, std::size_t itemCount,
+      std::size_t separatorCount
   ) {
     const DockEdge edge = cfg.position;
     const bool vertical = isVerticalEdge(edge);
@@ -335,7 +359,7 @@ namespace shell::dock {
         }
       }
       const float maxSpan = std::max(0.0F, surfaceW - bleedL - bleedR - insetL - insetR - mainPad * 2.0F);
-      const auto contentSpan = static_cast<float>(dockContentSize(cfg, itemCount));
+      const auto contentSpan = static_cast<float>(dockContentSize(cfg, itemCount, separatorCount));
       const float panelW = std::min(maxSpan, contentSpan);
       const float panelX = bleedL + insetL + mainPad + (maxSpan - panelW) * 0.5F;
       return DockPanelGeometry{
@@ -355,7 +379,7 @@ namespace shell::dock {
       }
     }
     const float maxSpan = std::max(0.0F, surfaceH - bleedU - bleedD - insetT - insetB - mainPad * 2.0F);
-    const auto contentSpan = static_cast<float>(dockContentSize(cfg, itemCount));
+    const auto contentSpan = static_cast<float>(dockContentSize(cfg, itemCount, separatorCount));
     const float panelH = std::min(maxSpan, contentSpan);
     const float panelY = bleedU + insetT + mainPad + (maxSpan - panelH) * 0.5F;
     return DockPanelGeometry{

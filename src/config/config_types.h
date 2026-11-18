@@ -698,6 +698,16 @@ enum class DockLauncherPosition : std::uint8_t {
   End = 2,
 };
 
+enum class DockMagnificationStyle : std::uint8_t {
+  Classic = 0, // icons grow inside a fixed-size dock; neighbors spread within it
+  Macos = 1,   // the dock grows around the pointer and the hovered icon stays under it
+};
+
+constexpr EnumOption<DockMagnificationStyle> kDockMagnificationStyles[] = {
+    {DockMagnificationStyle::Classic, "classic", "settings.options.dock-magnification-style.classic"},
+    {DockMagnificationStyle::Macos, "macos", "settings.options.dock-magnification-style.macos"},
+};
+
 constexpr EnumOption<DockLauncherPosition> kDockLauncherPositions[] = {
     {DockLauncherPosition::None, "none", "settings.options.dock-launcher-position.none"},
     {DockLauncherPosition::Start, "start", "settings.options.dock-launcher-position.start"},
@@ -741,6 +751,12 @@ struct DockMonitorOverride {
   std::optional<float> inactiveScale;
   std::optional<bool> magnification;
   std::optional<float> magnificationScale;
+  std::optional<DockMagnificationStyle> magnificationStyle;
+  std::optional<float> magnificationRange;
+  std::optional<ColorSpec> separatorColor;
+  std::optional<float> separatorThickness;
+  std::optional<float> separatorLength;
+  std::optional<std::int32_t> separatorSpacing;
   std::optional<float> activeOpacity;
   std::optional<float> inactiveOpacity;
   std::optional<bool> showDots;
@@ -789,9 +805,16 @@ struct DockConfig {
   float inactiveScale = 0.85F;      // non-focused app icon scale
   bool magnification = true;        // magnify icons near the pointer (macOS-style)
   float magnificationScale = 1.45F; // max icon scale multiplier at the pointer center
-  float activeOpacity = 1.0F;       // focused app icon opacity
-  float inactiveOpacity = 0.85F;    // non-focused app icon opacity
-  float iconSaturation = 1.0F;      // app icon saturation (0 = grayscale)
+  DockMagnificationStyle magnificationStyle = DockMagnificationStyle::Classic;
+  float magnificationRange = 0.0F; // falloff radius in items on each side of the pointer; 0 = style default
+  // Separators: "separator" entries in `pinned` draw a divider line between items.
+  ColorSpec separatorColor = colorSpecFromRole(ColorRole::OutlineVariant);
+  float separatorThickness = 1.0F;   // line thickness in px
+  float separatorLength = 0.7F;      // line length as a fraction of the icon size
+  std::int32_t separatorSpacing = 6; // gap on each side of the line, in px (on top of item_spacing)
+  float activeOpacity = 1.0F;        // focused app icon opacity
+  float inactiveOpacity = 0.85F;     // non-focused app icon opacity
+  float iconSaturation = 1.0F;       // app icon saturation (0 = grayscale)
   bool colorizeIcons = false;
   bool showDots = false;         // show optional running window dots below app icons
   bool showInstanceCount = true; // show a badge with count when app has >1 window

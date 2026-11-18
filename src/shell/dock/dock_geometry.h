@@ -41,11 +41,19 @@ namespace shell::dock {
   std::uint32_t positionToAnchor(DockEdge edge);
   bool isVerticalEdge(DockEdge edge);
   void shiftAlongEdge(DockEdge edge, float& x, float& y, float amount);
-  std::int32_t dockContentSize(const DockConfig& cfg, std::size_t itemCount);
+  // `itemCount` counts every row entry; `separatorCount` of them are narrow separator cells.
+  std::int32_t dockContentSize(const DockConfig& cfg, std::size_t itemCount, std::size_t separatorCount = 0);
   std::int32_t dockThickness(const DockConfig& cfg);
   // Extra cross-axis surface padding so magnified icons (and badges) are not clipped.
   std::int32_t dockHoverZoomCrossPad(const DockConfig& cfg);
-  // Extra main-axis end padding for magnified icon/badge overhang past the pill ends.
+  // Default magnification falloff radius, in item pitches, on each side of the pointer.
+  inline constexpr float kDockClassicMagnificationRadius = 1.5F;
+  inline constexpr float kDockMacosMagnificationRadius = 2.75F;
+  // `magnification_range`, or the style's default when it is 0.
+  float dockMagnificationRadius(const DockConfig& cfg) noexcept;
+  // Main-axis size of a separator cell: the line plus `separator_spacing` on each side.
+  std::int32_t dockSeparatorCellSize(const DockConfig& cfg);
+  // Extra main-axis end padding for the dock growing past its resting pill ends while magnified.
   std::int32_t dockHoverZoomMainPad(const DockConfig& cfg);
   std::size_t dockLauncherButtonCount(DockLauncherPosition position);
   std::size_t dockLauncherButtonCount(const DockConfig& cfg);
@@ -63,7 +71,8 @@ namespace shell::dock {
       std::int32_t outputLogicalHeight
   );
   DockPanelGeometry computePanelGeometry(
-      const DockConfig& cfg, const ShadowStyle& shadow, float surfaceW, float surfaceH, std::size_t itemCount
+      const DockConfig& cfg, const ShadowStyle& shadow, float surfaceW, float surfaceH, std::size_t itemCount,
+      std::size_t separatorCount = 0
   );
   std::pair<float, float> computeHiddenSlideDelta(
       const DockConfig& cfg, const ShadowStyle& shadow, float surfaceW, float surfaceH, const DockPanelGeometry& panel

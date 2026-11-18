@@ -211,6 +211,41 @@ namespace shell::dock {
     instance.surface->setBlurRegion(blurStrips);
   }
 
+  void applyDockPanelGrowth(DockInstance& instance, const DockConfig& cfg) {
+    if (instance.panel == nullptr || instance.viewport == nullptr || instance.row == nullptr) {
+      return;
+    }
+    const bool vertical = isVerticalEdge(cfg.position);
+    const float growStart = instance.panelGrowStart;
+    const float growTotal = instance.panelGrowStart + instance.panelGrowEnd;
+    const auto setMain = [vertical](Node* node, float main, float length) {
+      if (vertical) {
+        node->setPosition(node->x(), main);
+        node->setSize(node->width(), length);
+      } else {
+        node->setPosition(main, node->y());
+        node->setSize(length, node->height());
+      }
+    };
+    setMain(instance.panel, instance.panelBaseMain - growStart, instance.panelBaseLength + growTotal);
+    if (instance.shadow != nullptr) {
+      setMain(instance.shadow, instance.shadowBaseMain - growStart, instance.shadowBaseLength + growTotal);
+    }
+    if (instance.maxScrollOffset <= 0.0F) {
+      const auto& geo = instance.panelGeometry;
+      if (vertical) {
+        instance.viewport->setPosition(0.0F, geo.panelY - growStart);
+        instance.viewport->setSize(instance.viewport->width(), geo.panelH + growTotal);
+        instance.row->setPosition(instance.row->x(), growStart);
+      } else {
+        instance.viewport->setPosition(geo.panelX - growStart, 0.0F);
+        instance.viewport->setSize(geo.panelW + growTotal, instance.viewport->height());
+        instance.row->setPosition(growStart, instance.row->y());
+      }
+    }
+    applyDockCompositorBlur(instance, cfg);
+  }
+
   void buildScene(DockInstance& instance, DockInstanceDependencies deps, const DockInstanceCallbacks& callbacks) {
     uiAssertNotRendering("shell::dock::buildScene");
     if (instance.surface == nullptr) {
@@ -328,7 +363,10 @@ namespace shell::dock {
     }
 
     const auto totalItemCount = instance.items.size() + shell::dock::dockLauncherButtonCount(cfg);
-    instance.panelGeometry = shell::dock::computePanelGeometry(cfg, shadowConfig, w, h, totalItemCount);
+    const auto separatorCount = static_cast<std::size_t>(
+        std::ranges::count_if(instance.items, [](const DockItemView& item) { return item.separator; })
+    );
+    instance.panelGeometry = shell::dock::computePanelGeometry(cfg, shadowConfig, w, h, totalItemCount, separatorCount);
     const auto& panelGeometry = instance.panelGeometry;
 
     // Update root size on reconfigure.
@@ -370,9 +408,18 @@ namespace shell::dock {
         panelGeometry.panelH + concave.logicalInset.top + concave.logicalInset.bottom
     );
 
+    instance.panelBaseMain = vert ? instance.panel->y() : instance.panel->x();
+    instance.panelBaseLength = vert ? instance.panel->height() : instance.panel->width();
+    if (instance.shadow != nullptr) {
+      instance.shadowBaseMain = vert ? instance.shadow->y() : instance.shadow->x();
+      instance.shadowBaseLength = vert ? instance.shadow->height() : instance.shadow->width();
+    }
+    instance.panelGrowStart = 0.0F;
+    instance.panelGrowEnd = 0.0F;
+
     // The viewport follows the visible pill on its main axis and spans the surface on its cross axis,
     // allowing magnified icons to grow away from the screen edge.
-    const auto contentLength = static_cast<float>(shell::dock::dockContentSize(cfg, totalItemCount));
+    const auto contentLength = static_cast<float>(shell::dock::dockContentSize(cfg, totalItemCount, separatorCount));
     if (vert) {
       instance.viewport->setPosition(0.0F, panelGeometry.panelY);
       instance.viewport->setSize(w, panelGeometry.panelH);
@@ -386,7 +433,10 @@ namespace shell::dock {
       instance.row->setSize(contentLength, panelGeometry.panelH);
       instance.maxScrollOffset = std::max(0.0F, contentLength - panelGeometry.panelW);
     }
-    instance.viewport->setClipChildren(!cfg.iconShadow || instance.maxScrollOffset > 0.0F);
+    // The macOS magnification style grows the dock past its resting ends, so it only clips a
+    // scrolling row.
+    const bool growsPastEnds = cfg.magnificationStyle == DockMagnificationStyle::Macos;
+    instance.viewport->setClipChildren(instance.maxScrollOffset > 0.0F || (!cfg.iconShadow && !growsPastEnds));
     applyDockScrollOffset(instance, cfg);
     instance.row->layout(renderer);
     shell::dock::syncDockItemRestPositions(instance, cfg);

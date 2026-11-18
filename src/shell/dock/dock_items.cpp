@@ -52,8 +52,6 @@ namespace {
   constexpr float kHoverZoomReferenceFrameMs = 1000.0F / 60.0F;
   // Pointer hit padding (in item pitches) — keep generous so edge icons still magnify.
   constexpr float kHoverZoomInfluence = 2.25F;
-  // Scale falloff radius — tighter than hit padding so neighbors stay closer to rest size.
-  constexpr float kHoverZoomFalloffInfluence = 1.5F;
   constexpr std::int32_t kHoverZoomZScale = 100;
   constexpr auto kDragHoldDelay = std::chrono::milliseconds(300);
 
@@ -189,18 +187,18 @@ namespace {
   }
 
   void clampSpreadOffsetsToBounds(
-      const std::vector<float>& restMainPos, const std::vector<float>& scales, float cellMain, float iconSize,
-      float boundsMin, float boundsMax, std::vector<float>& offsets
+      const std::vector<float>& restCenters, const std::vector<float>& scales, float iconSize, float boundsMin,
+      float boundsMax, std::vector<float>& offsets
   ) {
-    if (offsets.empty() || restMainPos.size() != offsets.size() || scales.size() != offsets.size()) {
+    if (offsets.empty() || restCenters.size() != offsets.size() || scales.size() != offsets.size()) {
       return;
     }
 
     const auto restVisualMainMax = [&](std::size_t index) {
-      return restMainPos[index] + cellMain * 0.5F + iconSize * scales[index] * 0.5F;
+      return restCenters[index] + iconSize * scales[index] * 0.5F;
     };
     const auto restVisualMainMin = [&](std::size_t index) {
-      return restMainPos[index] + cellMain * 0.5F - iconSize * scales[index] * 0.5F;
+      return restCenters[index] - iconSize * scales[index] * 0.5F;
     };
 
     float spreadFactor = 1.0F;
@@ -269,7 +267,8 @@ namespace {
   }
 
   float computeHoverMultiplier(
-      float pointerMain, float itemCenterMain, float itemPitch, float maxMultiplier, float falloffInfluence
+      float pointerMain, float itemCenterMain, float itemPitch, float maxMultiplier, float falloffInfluence,
+      DockMagnificationStyle style
   ) {
     if (maxMultiplier <= 1.0F) {
       return 1.0F;
@@ -280,9 +279,16 @@ namespace {
       return 1.0F;
     }
     const float t = distance / influence;
-    const float cosine = std::cos(t * std::numbers::pi_v<float> * 0.5F);
-    // Squared cosine keeps the center pop but drops neighbors toward rest scale faster.
-    const float falloff = cosine * cosine;
+    float falloff = 0.0F;
+    if (style == DockMagnificationStyle::Macos) {
+      // Raised cosine (Hann window): flat at the pointer and smooth at the radius, so the icon under
+      // the pointer barely changes while it moves within that icon and neighbors ease in gradually.
+      falloff = 0.5F * (1.0F + std::cos(t * std::numbers::pi_v<float>));
+    } else {
+      // Squared cosine keeps the center pop but drops neighbors toward rest scale faster.
+      const float cosine = std::cos(t * std::numbers::pi_v<float> * 0.5F);
+      falloff = cosine * cosine;
+    }
     return 1.0F + (maxMultiplier - 1.0F) * falloff;
   }
 
@@ -481,6 +487,120 @@ namespace shell::dock {
     return areaNode;
   }
 
+  // Press-and-hold drag-to-reorder for pinned dock entries (apps and separators).
+  void attachDragHandlers(
+      InputArea& area, DockInstance* instPtr, const std::shared_ptr<DockItemClickContext>& clickContext,
+      std::size_t itemIndex, bool itemPinned
+  ) {
+    area.setOnPress([instPtr, clickContext, itemIndex, itemPinned](const InputArea::PointerData& d) {
+      if (d.button != BTN_LEFT) {
+        return;
+      }
+      auto& drag = instPtr->drag;
+      const auto& dockCfg = instPtr->config;
+      if (d.pressed) {
+        if (!itemPinned) {
+          return;
+        }
+        resetDockItemDragState(*instPtr);
+        drag.pinned = true;
+        drag.sourceIndex = itemIndex;
+        drag.startMain = pointerMainOnRow(dockCfg, instPtr->items[itemIndex].area, d.localX, d.localY);
+        drag.currentMain = drag.startMain;
+        drag.targetIndex = itemIndex;
+        drag.holdTimer.start(kDragHoldDelay, [instPtr, itemIndex] {
+          if (instPtr->drag.sourceIndex == itemIndex && !instPtr->drag.active) {
+            instPtr->drag.armed = true;
+            dismissDockTooltipImpl();
+          }
+        });
+        return;
+      }
+
+      if (drag.sourceIndex != itemIndex) {
+        return;
+      }
+
+      if (drag.active) {
+        if (clickContext->callbacks.endDrag) {
+          clickContext->callbacks.endDrag(*instPtr, true);
+        }
+        return;
+      }
+
+      drag.holdTimer.stop();
+      if (drag.armed) {
+        if (clickContext->callbacks.endDrag) {
+          clickContext->callbacks.endDrag(*instPtr, false);
+        }
+      } else {
+        resetDockItemDragState(*instPtr);
+      }
+    });
+    area.setOnMotion([instPtr, clickContext, itemIndex, itemPinned](const InputArea::PointerData& d) {
+      if (!itemPinned || instPtr->drag.sourceIndex != itemIndex) {
+        return;
+      }
+      if (!instPtr->drag.armed && !instPtr->drag.active) {
+        return;
+      }
+
+      const auto& dockCfg = instPtr->config;
+      const float mainPos = pointerMainOnRow(dockCfg, instPtr->items[itemIndex].area, d.localX, d.localY);
+      instPtr->drag.currentMain = mainPos;
+      if (instPtr->drag.active) {
+        if (clickContext->callbacks.updateDrag) {
+          clickContext->callbacks.updateDrag(*instPtr, mainPos);
+        }
+      } else if (instPtr->drag.armed && clickContext->callbacks.beginDrag) {
+        clickContext->callbacks.beginDrag(*instPtr, itemIndex, mainPos);
+      }
+    });
+  }
+
+  // A thin divider line from a "separator" pinned entry. It keeps an InputArea so it can be
+  // dragged like a pinned app, but it has no icon, tooltip, click action or context menu.
+  std::unique_ptr<InputArea> createSeparatorCell(
+      DockInstance& instance, const DockConfig& cfg, const std::shared_ptr<DockItemClickContext>& clickContext,
+      std::size_t itemIndex, bool itemPinned
+  ) {
+    const bool vert = shell::dock::isVerticalEdge(cfg.position);
+    const auto iSize = static_cast<float>(cfg.iconSize);
+    const auto cellMain = static_cast<float>(shell::dock::dockSeparatorCellSize(cfg));
+    const float cellCross = iSize + 2.0F * kCellPad;
+    const float thickness = std::max(0.5F, cfg.separatorThickness);
+    const float length = std::clamp(cfg.separatorLength, 0.0F, 1.0F) * iSize;
+
+    auto area = ui::inputArea({});
+    if (!vert) {
+      area->setSize(cellMain, cellCross);
+    } else {
+      area->setSize(cellCross, cellMain);
+    }
+    const float lineMain = (cellMain - thickness) * 0.5F;
+    const float lineCross = (cellCross - length) * 0.5F;
+    area->addChild(
+        ui::box({
+            .fill = cfg.separatorColor,
+            .radius = thickness * 0.5F,
+            .width = vert ? length : thickness,
+            .height = vert ? thickness : length,
+            .participatesInLayout = false,
+            .configure = [vert, lineMain, lineCross](Box& box) {
+              box.setPosition(vert ? lineCross : lineMain, vert ? lineMain : lineCross);
+            },
+        })
+    );
+    area->setAcceptedButtons(InputArea::buttonMask({BTN_LEFT}));
+    attachDragHandlers(*area, &instance, clickContext, itemIndex, itemPinned);
+    // Nothing to activate, but consume the click-suppression flag a drag of this separator sets,
+    // or it would swallow the next click on an app.
+    area->setOnClick([instPtr = &instance](const InputArea::PointerData& /*d*/) {
+      instPtr->suppressItemClick = false;
+    });
+    return area;
+  }
+
   void rebuildItems(
       DockInstance& instance, DockItemSceneDependencies deps, const DockSnapshot& snapshot,
       const DockItemCallbacks& callbacks
@@ -551,6 +671,13 @@ namespace shell::dock {
     for (std::size_t itemIndex = 0; itemIndex < itemModels.size(); ++itemIndex) {
       const auto& model = itemModels[itemIndex];
       auto& item = instance.items.emplace_back();
+      if (model.separator) {
+        item.separator = true;
+        item.area = static_cast<InputArea*>(
+            instance.row->addChild(createSeparatorCell(instance, cfg, clickContext, itemIndex, itemIndex < pinnedCount))
+        );
+        continue;
+      }
       DockItemAction action{
           .entry = model.entry,
           .idLower = model.idLower,
@@ -729,70 +856,7 @@ namespace shell::dock {
       configureDockTooltip(*areaNode, cfg, item.tooltipText);
       areaNode->setAcceptedButtons(InputArea::buttonMask({BTN_LEFT, BTN_RIGHT}));
       const bool itemPinned = itemIndex < pinnedCount;
-      areaNode->setOnPress([instPtr, clickContext, itemIndex, itemPinned](const InputArea::PointerData& d) {
-        if (d.button != BTN_LEFT) {
-          return;
-        }
-        auto& drag = instPtr->drag;
-        const auto& dockCfg = instPtr->config;
-        if (d.pressed) {
-          if (!itemPinned) {
-            return;
-          }
-          resetDockItemDragState(*instPtr);
-          drag.pinned = true;
-          drag.sourceIndex = itemIndex;
-          drag.startMain = pointerMainOnRow(dockCfg, instPtr->items[itemIndex].area, d.localX, d.localY);
-          drag.currentMain = drag.startMain;
-          drag.targetIndex = itemIndex;
-          drag.holdTimer.start(kDragHoldDelay, [instPtr, itemIndex] {
-            if (instPtr->drag.sourceIndex == itemIndex && !instPtr->drag.active) {
-              instPtr->drag.armed = true;
-              dismissDockTooltipImpl();
-            }
-          });
-          return;
-        }
-
-        if (drag.sourceIndex != itemIndex) {
-          return;
-        }
-
-        if (drag.active) {
-          if (clickContext->callbacks.endDrag) {
-            clickContext->callbacks.endDrag(*instPtr, true);
-          }
-          return;
-        }
-
-        drag.holdTimer.stop();
-        if (drag.armed) {
-          if (clickContext->callbacks.endDrag) {
-            clickContext->callbacks.endDrag(*instPtr, false);
-          }
-        } else {
-          resetDockItemDragState(*instPtr);
-        }
-      });
-      areaNode->setOnMotion([instPtr, clickContext, itemIndex, itemPinned](const InputArea::PointerData& d) {
-        if (!itemPinned || instPtr->drag.sourceIndex != itemIndex) {
-          return;
-        }
-        if (!instPtr->drag.armed && !instPtr->drag.active) {
-          return;
-        }
-
-        const auto& dockCfg = instPtr->config;
-        const float mainPos = pointerMainOnRow(dockCfg, instPtr->items[itemIndex].area, d.localX, d.localY);
-        instPtr->drag.currentMain = mainPos;
-        if (instPtr->drag.active) {
-          if (clickContext->callbacks.updateDrag) {
-            clickContext->callbacks.updateDrag(*instPtr, mainPos);
-          }
-        } else if (instPtr->drag.armed && clickContext->callbacks.beginDrag) {
-          clickContext->callbacks.beginDrag(*instPtr, itemIndex, mainPos);
-        }
-      });
+      attachDragHandlers(*areaNode, instPtr, clickContext, itemIndex, itemPinned);
       areaNode->setOnClick([action = std::move(action), instPtr, clickContext](const InputArea::PointerData& d) {
         if (d.button == BTN_RIGHT) {
           if (clickContext->callbacks.openItemMenu) {
@@ -860,6 +924,9 @@ namespace shell::dock {
     for (std::size_t itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
       auto& item = instance.items[itemIndex];
       const auto& model = snapshot.items[itemIndex];
+      if (item.separator) {
+        continue;
+      }
       const bool dragActive = instance.drag.active;
       const bool isDraggedItem = dragActive && itemIndex == instance.drag.sourceIndex;
       const float iconScale = model.active ? cfg.activeScale : cfg.inactiveScale;
@@ -1071,6 +1138,9 @@ namespace shell::dock {
     const float baseLauncherScale = cfg.inactiveScale;
     const bool pointerActive = instance.pointerInside && instance.hoverPointerValid;
     const std::size_t itemCount = std::min(instance.items.size(), snapshot.items.size());
+    const auto separatorMain = static_cast<float>(shell::dock::dockSeparatorCellSize(cfg));
+    const bool macosStyle = cfg.magnificationStyle == DockMagnificationStyle::Macos;
+    const float falloffRadius = shell::dock::dockMagnificationRadius(cfg);
     bool needsMoreFrames = false;
 
     struct HoverSlot {
@@ -1086,6 +1156,8 @@ namespace shell::dock {
       float targetScale = 1.0F;
       float targetMainOffset = 0.0F;
       float restCenterMain = 0.0F;
+      float mainSize = 0.0F; // resting main-axis size of the slot's cell
+      bool separator = false;
       float iconBaseX = kCellPad;
       float iconBaseY = kCellPad;
     };
@@ -1104,6 +1176,7 @@ namespace shell::dock {
               .restCrossPos = instance.launcherRestCrossPos,
               .baseScale = baseLauncherScale,
               .restCenterMain = itemRestCenterMain(instance.launcherRestMainPos, cellMain),
+              .mainSize = cellMain,
               .iconBaseX = kCellPad,
               .iconBaseY = launcherIconBaseY(cfg, iSize),
           }
@@ -1113,6 +1186,7 @@ namespace shell::dock {
       auto& item = instance.items[itemIndex];
       const auto& model = snapshot.items[itemIndex];
       Node* iconNode = item.iconNode;
+      const float itemMain = item.separator ? separatorMain : cellMain;
       slots.push_back(
           HoverSlot{
               .area = item.area,
@@ -1123,8 +1197,12 @@ namespace shell::dock {
               .scaleAnimId = &item.scaleAnimId,
               .restMainPos = item.restMainPos,
               .restCrossPos = item.restCrossPos,
-              .baseScale = model.active ? cfg.activeScale : cfg.inactiveScale,
-              .restCenterMain = itemRestCenterMain(item.restMainPos, cellMain),
+              .baseScale = item.separator ? 1.0F
+                  : model.active          ? cfg.activeScale
+                                          : cfg.inactiveScale,
+              .restCenterMain = itemRestCenterMain(item.restMainPos, itemMain),
+              .mainSize = itemMain,
+              .separator = item.separator,
           }
       );
     }
@@ -1140,6 +1218,7 @@ namespace shell::dock {
               .restCrossPos = instance.launcherRestCrossPos,
               .baseScale = baseLauncherScale,
               .restCenterMain = itemRestCenterMain(instance.launcherRestMainPos, cellMain),
+              .mainSize = cellMain,
               .iconBaseX = kCellPad,
               .iconBaseY = launcherIconBaseY(cfg, iSize),
           }
@@ -1149,34 +1228,79 @@ namespace shell::dock {
     std::vector<float> slotScales;
     slotScales.reserve(slots.size());
     for (HoverSlot& slot : slots) {
-      const float hoverMultiplier = pointerActive ? computeHoverMultiplier(
-                                                        instance.hoverPointerMain, slot.restCenterMain, itemPitch,
-                                                        cfg.magnificationScale, kHoverZoomFalloffInfluence
-                                                    )
-                                                  : 1.0F;
+      const float hoverMultiplier = pointerActive && !slot.separator
+          ? computeHoverMultiplier(
+                instance.hoverPointerMain, slot.restCenterMain, itemPitch, cfg.magnificationScale, falloffRadius,
+                cfg.magnificationStyle
+            )
+          : 1.0F;
       slot.targetScale = slot.baseScale * hoverMultiplier;
       slotScales.push_back(slot.targetScale);
     }
 
     std::vector<float> targetOffsets;
-    if (pointerActive) {
+    float targetGrowStart = 0.0F;
+    float targetGrowEnd = 0.0F;
+    const bool canGrow = macosStyle && instance.maxScrollOffset <= 0.0F;
+    if (pointerActive && canGrow && !slots.empty()) {
+      // macOS layout: every magnified icon widens its own slot, and the whole row is shifted so
+      // the point under the pointer stays under the pointer. The hovered icon therefore never
+      // slides away from the cursor, and the pill grows outward around it.
+      const float spacing = static_cast<float>(cfg.itemSpacing);
+      std::vector<float> extra(slots.size(), 0.0F);
+      float totalExtra = 0.0F;
+      for (std::size_t index = 0; index < slots.size(); ++index) {
+        extra[index] = iSize * std::max(0.0F, slots[index].targetScale - slots[index].baseScale);
+        totalExtra += extra[index];
+      }
+      const float pointer = instance.hoverPointerMain;
+      std::size_t anchorIndex = slots.size() - 1U;
+      float anchorFraction = 1.0F;
+      for (std::size_t index = 0; index < slots.size(); ++index) {
+        const float slotStart = slots[index].restMainPos - spacing * 0.5F;
+        const float slotPitch = slots[index].mainSize + spacing;
+        if (pointer < slotStart + slotPitch || index + 1U == slots.size()) {
+          anchorIndex = index;
+          anchorFraction = std::clamp((pointer - slotStart) / slotPitch, 0.0F, 1.0F);
+          break;
+        }
+      }
+      float before = 0.0F;
+      for (std::size_t index = 0; index < anchorIndex; ++index) {
+        before += extra[index];
+      }
+      const float shift = -(before + anchorFraction * extra[anchorIndex]);
+      targetOffsets.assign(slots.size(), 0.0F);
+      float cumulative = 0.0F;
+      for (std::size_t index = 0; index < slots.size(); ++index) {
+        targetOffsets[index] = cumulative + extra[index] * 0.5F + shift;
+        cumulative += extra[index];
+      }
+      targetGrowStart = -shift;
+      targetGrowEnd = totalExtra + shift;
+    } else if (pointerActive) {
       computeSymmetricSpreadOffsets(slotScales, iSize, targetOffsets);
-      std::vector<float> restMainPos;
-      restMainPos.reserve(slots.size());
+      std::vector<float> restCenters;
+      restCenters.reserve(slots.size());
       for (const HoverSlot& slot : slots) {
-        restMainPos.push_back(slot.restMainPos);
+        restCenters.push_back(slot.restCenterMain);
       }
       const float rowMainSize = vertical ? instance.row->height() : instance.row->width();
       const auto mainPad = static_cast<float>(cfg.mainAxisPadding);
-      clampSpreadOffsetsToBounds(
-          restMainPos, slotScales, cellMain, iSize, mainPad, rowMainSize - mainPad, targetOffsets
-      );
+      clampSpreadOffsetsToBounds(restCenters, slotScales, iSize, mainPad, rowMainSize - mainPad, targetOffsets);
     } else {
       targetOffsets.assign(slots.size(), 0.0F);
     }
 
     for (std::size_t index = 0; index < slots.size(); ++index) {
       slots[index].targetMainOffset = targetOffsets[index];
+    }
+
+    bool growChanged = lerpHoverMainOffset(instance.panelGrowStart, targetGrowStart, lerpFactor);
+    growChanged = lerpHoverMainOffset(instance.panelGrowEnd, targetGrowEnd, lerpFactor) || growChanged;
+    if (growChanged) {
+      needsMoreFrames = true;
+      shell::dock::applyDockPanelGrowth(instance, cfg);
     }
 
     for (HoverSlot& slot : slots) {
@@ -1194,6 +1318,21 @@ namespace shell::dock {
 
       const float paintScale = *slot.visualScale > 0.0F ? *slot.visualScale : slot.targetScale;
       applyHoverZoomZIndex(slot.area, paintScale);
+      if (macosStyle && slot.area != nullptr) {
+        // Widen the hit target with the icon so the magnified slot (icon + half the gap on each
+        // side) stays clickable and hover never drops into a dead gap between items.
+        const float hitMain =
+            std::max(0.0F, iSize * (paintScale - slot.baseScale) + static_cast<float>(cfg.itemSpacing)) * 0.5F;
+        HitTestOutset outset = slot.area->hitTestOutset();
+        if (vertical) {
+          outset.top = hitMain;
+          outset.bottom = hitMain;
+        } else {
+          outset.left = hitMain;
+          outset.right = hitMain;
+        }
+        slot.area->setHitTestOutset(outset);
+      }
       if (!instance.drag.active) {
         syncHoveredTooltipAnchor(slot.area, cfg, iSize, paintScale);
       }
@@ -1243,8 +1382,7 @@ namespace shell::dock {
     if (pinnedCount == 0 || instance.items.empty()) {
       return 0;
     }
-    const float cellMain = static_cast<float>(cfg.iconSize) + 2.0F * kCellPad;
-    const float pitch = cellMain + static_cast<float>(cfg.itemSpacing);
+    const bool vertical = shell::dock::isVerticalEdge(cfg.position);
 
     std::size_t target = 0;
     const std::size_t limit = std::min(pinnedCount, instance.items.size());
@@ -1253,7 +1391,9 @@ namespace shell::dock {
       if (item.area == nullptr) {
         continue;
       }
-      const float restCenter = item.restMainPos + cellMain * 0.5F;
+      const float itemMain = vertical ? item.area->height() : item.area->width();
+      const float pitch = itemMain + static_cast<float>(cfg.itemSpacing);
+      const float restCenter = item.restMainPos + itemMain * 0.5F;
       if (mainPos > restCenter + pitch * 0.05F) {
         target = i + 1;
       }
@@ -1266,10 +1406,14 @@ namespace shell::dock {
       return;
     }
     const bool vertical = shell::dock::isVerticalEdge(cfg.position);
-    const float cellMain = static_cast<float>(cfg.iconSize) + 2.0F * kCellPad;
-    const float pitch = cellMain + static_cast<float>(cfg.itemSpacing);
     const std::size_t pinnedCount = cfg.pinned.size();
     const std::size_t source = instance.drag.sourceIndex;
+    // Neighbors make room by the dragged entry's own pitch (separators are narrower than apps).
+    float pitch = static_cast<float>(cfg.iconSize) + 2.0F * kCellPad + static_cast<float>(cfg.itemSpacing);
+    if (source < instance.items.size() && instance.items[source].area != nullptr) {
+      const InputArea* sourceArea = instance.items[source].area;
+      pitch = (vertical ? sourceArea->height() : sourceArea->width()) + static_cast<float>(cfg.itemSpacing);
+    }
     const std::size_t target = instance.drag.targetIndex;
 
     for (std::size_t i = 0; i < instance.items.size(); ++i) {

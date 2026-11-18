@@ -263,6 +263,17 @@ namespace settings::registry {
           "magnify zoom"
       ));
       entries.push_back(makeEntry(
+          SettingsSection::Dock, "focus-styling", tr("settings.schema.dock.magnification-style.label"),
+          tr("settings.schema.dock.magnification-style.description"), path("magnification_style"),
+          asSegmented(enumSelect(kDockMagnificationStyles, dock.magnificationStyle)), "magnify zoom mac macos classic"
+      ));
+      entries.push_back(makeEntry(
+          SettingsSection::Dock, "focus-styling", tr("settings.schema.dock.magnification-range.label"),
+          tr("settings.schema.dock.magnification-range.description"), path("magnification_range"),
+          sliderFor(dock.magnificationRange, noctalia::config::schema::kDockMagnificationRangeRange, false),
+          "magnify zoom falloff radius neighbors", true
+      ));
+      entries.push_back(makeEntry(
           SettingsSection::Dock, "focus-styling", tr("settings.schema.dock.active-icon-scale.label"),
           tr("settings.schema.dock.active-icon-scale.description"), path("active_scale"),
           sliderFor(dock.activeScale, noctalia::config::schema::kDockActiveScaleRange, false), "focused", true
@@ -281,6 +292,29 @@ namespace settings::registry {
           SettingsSection::Dock, "focus-styling", tr("settings.schema.dock.inactive-icon-opacity.label"),
           tr("settings.schema.dock.inactive-icon-opacity.description"), path("inactive_opacity"),
           sliderFor(dock.inactiveOpacity, noctalia::config::schema::kUnitRange, false), "unfocused alpha", true
+      ));
+      entries.push_back(makeEntry(
+          SettingsSection::Dock, "separators", tr("settings.schema.dock.separator-color.label"),
+          tr("settings.schema.dock.separator-color.description"), path("separator_color"),
+          colorSpecPicker(dock.separatorColor), "separator divider line color"
+      ));
+      entries.push_back(makeEntry(
+          SettingsSection::Dock, "separators", tr("settings.schema.dock.separator-thickness.label"),
+          tr("settings.schema.dock.separator-thickness.description"), path("separator_thickness"),
+          sliderFor(dock.separatorThickness, noctalia::config::schema::kDockSeparatorThicknessRange, false),
+          "separator divider line width", true
+      ));
+      entries.push_back(makeEntry(
+          SettingsSection::Dock, "separators", tr("settings.schema.dock.separator-length.label"),
+          tr("settings.schema.dock.separator-length.description"), path("separator_length"),
+          sliderFor(dock.separatorLength, noctalia::config::schema::kDockSeparatorLengthRange, false),
+          "separator divider line height", true
+      ));
+      entries.push_back(makeEntry(
+          SettingsSection::Dock, "separators", tr("settings.schema.dock.separator-spacing.label"),
+          tr("settings.schema.dock.separator-spacing.description"), path("separator_spacing"),
+          sliderFor(dock.separatorSpacing, noctalia::config::schema::kDockSeparatorSpacingRange, true),
+          "separator divider gap margin", true
       ));
       entries.push_back(makeEntry(
           SettingsSection::Dock, "pinned-apps", tr("settings.schema.dock.pinned-apps.label"),
